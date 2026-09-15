@@ -22,6 +22,11 @@ def digest(path: Path) -> str:
     return value.hexdigest()
 
 
+def write_utf8_lf(path: Path, value: str) -> None:
+    """Write deterministic UTF-8/LF bytes on every operating system."""
+    path.write_bytes(value.encode("utf-8"))
+
+
 summary = {
     "release": "ObligationBench-v1.0",
     "release_date": "2026-09-15",
@@ -82,12 +87,13 @@ summary["cross_split_source_task_overlap"] = {
     if len(paths) > 1
 }
 
-(ROOT / "manifests" / "release_summary.json").write_text(
-    json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+write_utf8_lf(
+    ROOT / "manifests" / "release_summary.json",
+    json.dumps(summary, ensure_ascii=False, indent=2) + "\n",
 )
-(ROOT / "manifests" / "samples.jsonl").write_text(
+write_utf8_lf(
+    ROOT / "manifests" / "samples.jsonl",
     "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in sample_index),
-    encoding="utf-8",
 )
 
 excluded = {Path("manifests/files.sha256")}
@@ -99,5 +105,5 @@ paths = sorted(
     and ".git" not in path.parts
 )
 lines = [f"{digest(path)}  {path.relative_to(ROOT).as_posix()}" for path in paths]
-(ROOT / "manifests" / "files.sha256").write_text("\n".join(lines) + "\n", encoding="utf-8")
+write_utf8_lf(ROOT / "manifests" / "files.sha256", "\n".join(lines) + "\n")
 print(json.dumps(summary, ensure_ascii=False, indent=2))
