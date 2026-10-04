@@ -9,7 +9,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-EXPECTED = {"positive": 120, "negative": 104}
+EXPECTED = {"positive": 120, "negative": 120}
 REQUIRED = {
     "trajectory.json",
     "guard_input.json",

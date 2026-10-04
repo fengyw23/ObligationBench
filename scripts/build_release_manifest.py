@@ -28,8 +28,8 @@ def write_utf8_lf(path: Path, value: str) -> None:
 
 
 summary = {
-    "release": "ObligationBench-v1.0",
-    "release_date": "2026-09-15",
+    "release": "ObligationBench-v1.1.0",
+    "release_date": "2026-10-04",
     "splits": {},
     "total_trajectories": 0,
     "total_obligations": 0,

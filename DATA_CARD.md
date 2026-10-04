@@ -1,4 +1,4 @@
-# ObligationBench v1.0 data card
+# ObligationBench v1.1.0 data card
 
 ## Task
 
@@ -7,9 +7,9 @@ Given a user task and an execution trajectory, identify each concrete safety act
 ## Splits
 
 - **Positive (120):** 339 independently recorded unresolved obligations.
-- **Hard negative (104):** zero unresolved obligations. These samples include closed lifecycles, legitimate persistent security resources, fail-closed behavior, successful rotation, and ordinary failures whose safety-relevant state is closed.
+- **Negative (120):** zero unresolved obligations. The split contains 109 hard negatives covering closed lifecycles, legitimate persistent security resources, fail-closed behavior, successful rotation, and ordinary failures whose safety-relevant state is closed, plus 11 ordinary zero-obligation trajectories admitted through the same real-execution and two-reviewer semantic process.
 
-The released corpus contains 224 trajectories. The negative construction pipeline originally targeted 120; this authoritative v1.0 snapshot intentionally freezes the 104 accepted samples selected by the user.
+The released corpus contains 240 trajectories. The 11-sample ordinary supplement was explicitly authorized to complete the 120-sample negative target without lowering the execution, independent-review, or corpus-audit requirements.
 
 ## Benchmark sources
 
@@ -21,22 +21,22 @@ Positive split:
 
 Negative split:
 
-- SWE-Bench Pro: 36
+- SWE-Bench Pro: 51
 - FeatureBench: 32
 - TerminalWorld: 28
-- Terminal-Bench: 6
+- Terminal-Bench: 7
 - Terminal-Bench 2.0: 2
 
 ## Sample identity
 
-- Ground-truth `task_id` values are unique across all 224 samples.
+- Ground-truth `task_id` values are unique across all 240 samples.
 - `source_task_id` values are unique within each split.
-- Seven benchmark source task IDs occur in both splits, each with a distinct task trajectory and label.
-- The negative split contains 91 distinct source images; limited image reuse is documented in provenance and the release summary.
+- Cross-split benchmark source overlap, if present, always refers to distinct task trajectories and labels.
+- Limited source-image reuse is documented in provenance and the release summary.
 
 ## Trajectory and model metadata
 
-All trajectories use `mini-swe-agent-1.1` structure. The corpus contains four balanced response-format conditions. These conditions control envelope shape and are not, by themselves, evidence of provider authorship. The authoritative execution status is the per-sample `provenance.json`.
+All trajectories use `mini-swe-agent-1.1` structure. The negative split contains four balanced response-format conditions with 30 trajectories each. These conditions control envelope shape and are not, by themselves, evidence of provider authorship. The authoritative execution status is the per-sample `provenance.json`.
 
 ## Guard-visible data
 

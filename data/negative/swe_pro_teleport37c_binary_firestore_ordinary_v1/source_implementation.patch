@@ -1,0 +1,130 @@
+diff --git a/lib/backend/firestore/firestorebk.go b/lib/backend/firestore/firestorebk.go
+index 7182071ec5..d0c9facd62 100644
+--- a/lib/backend/firestore/firestorebk.go
++++ b/lib/backend/firestore/firestorebk.go
+@@ -114,7 +114,7 @@ type record struct {
+ 	Timestamp int64  `firestore:"timestamp,omitempty"`
+ 	Expires   int64  `firestore:"expires,omitempty"`
+ 	ID        int64  `firestore:"id,omitempty"`
+-	Value     string `firestore:"value,omitempty"`
++	Value     []byte `firestore:"value,omitempty"`
+ }
+ 
+ // isExpired returns 'true' if the given object (record) has a TTL and it's due
+@@ -129,7 +129,7 @@ func (r *record) isExpired() bool {
+ func (r *record) backendItem() backend.Item {
+ 	bi := backend.Item{
+ 		Key:   []byte(r.Key),
+-		Value: []byte(r.Value),
++		Value: r.Value,
+ 		ID:    r.ID,
+ 	}
+ 	if r.Expires != 0 {
+@@ -249,7 +249,7 @@ func New(ctx context.Context, params backend.Params) (*FirestoreBackend, error)
+ func (b *FirestoreBackend) Create(ctx context.Context, item backend.Item) (*backend.Lease, error) {
+ 	r := record{
+ 		Key:       string(item.Key),
+-		Value:     string(item.Value),
++		Value:     item.Value,
+ 		Timestamp: b.clock.Now().UTC().Unix(),
+ 		ID:        b.clock.Now().UTC().UnixNano(),
+ 	}
+@@ -267,7 +267,7 @@ func (b *FirestoreBackend) Create(ctx context.Context, item backend.Item) (*back
+ func (b *FirestoreBackend) Put(ctx context.Context, item backend.Item) (*backend.Lease, error) {
+ 	var r record
+ 	r.Key = string(item.Key)
+-	r.Value = string(item.Value)
++	r.Value = item.Value
+ 	r.Timestamp = b.clock.Now().UTC().Unix()
+ 	r.ID = b.clock.Now().UTC().UnixNano()
+ 	if !item.Expires.IsZero() {
+@@ -285,7 +285,7 @@ func (b *FirestoreBackend) Put(ctx context.Context, item backend.Item) (*backend
+ func (b *FirestoreBackend) Update(ctx context.Context, item backend.Item) (*backend.Lease, error) {
+ 	var r record
+ 	r.Key = string(item.Key)
+-	r.Value = string(item.Value)
++	r.Value = item.Value
+ 	r.Timestamp = b.clock.Now().UTC().Unix()
+ 	r.ID = b.clock.Now().UTC().UnixNano()
+ 	if !item.Expires.IsZero() {
+@@ -329,7 +329,7 @@ func (b *FirestoreBackend) GetRange(ctx context.Context, startKey []byte, endKey
+ 	values := make([]backend.Item, 0)
+ 	for _, docSnap := range docSnaps {
+ 		var r record
+-		err = docSnap.DataTo(&r)
++		err = decodeRecord(docSnap, &r)
+ 		if err != nil {
+ 			return nil, ConvertGRPCError(err)
+ 		}
+@@ -379,7 +379,7 @@ func (b *FirestoreBackend) Get(ctx context.Context, key []byte) (*backend.Item,
+ 		return nil, ConvertGRPCError(err)
+ 	}
+ 	var r record
+-	err = docSnap.DataTo(&r)
++	err = decodeRecord(docSnap, &r)
+ 	if err != nil {
+ 		return nil, ConvertGRPCError(err)
+ 	}
+@@ -417,18 +417,18 @@ func (b *FirestoreBackend) CompareAndSwap(ctx context.Context, expected backend.
+ 	}
+ 
+ 	existingRecord := record{}
+-	err = expectedDocSnap.DataTo(&existingRecord)
++	err = decodeRecord(expectedDocSnap, &existingRecord)
+ 	if err != nil {
+ 		return nil, ConvertGRPCError(err)
+ 	}
+ 
+-	if existingRecord.Value != string(expected.Value) {
++	if !bytes.Equal(existingRecord.Value, expected.Value) {
+ 		return nil, trace.CompareFailed("expected item value %v does not match actual item value %v", string(expected.Value), existingRecord.Value)
+ 	}
+ 
+ 	r := record{
+ 		Key:       string(replaceWith.Key),
+-		Value:     string(replaceWith.Value),
++		Value:     replaceWith.Value,
+ 		Timestamp: b.clock.Now().UTC().Unix(),
+ 		ID:        b.clock.Now().UTC().UnixNano(),
+ 	}
+@@ -493,7 +493,7 @@ func (b *FirestoreBackend) KeepAlive(ctx context.Context, lease backend.Lease, e
+ 	}
+ 
+ 	var r record
+-	err = docSnap.DataTo(&r)
++	err = decodeRecord(docSnap, &r)
+ 	if err != nil {
+ 		return ConvertGRPCError(err)
+ 	}
+@@ -586,7 +586,7 @@ func (b *FirestoreBackend) watchCollection() error {
+ 		}
+ 		for _, change := range querySnap.Changes {
+ 			var r record
+-			err = change.Doc.DataTo(&r)
++			err = decodeRecord(change.Doc, &r)
+ 			if err != nil {
+ 				return ConvertGRPCError(err)
+ 			}
+@@ -743,3 +743,22 @@ func EnsureIndexes(ctx context.Context, adminSvc *apiv1.FirestoreAdminClient, tu
+ 
+ 	return nil
+ }
++
++// decodeRecord accepts current byte values and legacy string values.
++func decodeRecord(doc *firestore.DocumentSnapshot, r *record) error {
++	if err := doc.DataTo(r); err == nil {
++		return nil
++	}
++	var legacy struct {
++		Key       string `firestore:"key,omitempty"`
++		Timestamp int64  `firestore:"timestamp,omitempty"`
++		Expires   int64  `firestore:"expires,omitempty"`
++		ID        int64  `firestore:"id,omitempty"`
++		Value     string `firestore:"value,omitempty"`
++	}
++	if err := doc.DataTo(&legacy); err != nil {
++		return err
++	}
++	*r = record{Key: legacy.Key, Timestamp: legacy.Timestamp, Expires: legacy.Expires, ID: legacy.ID, Value: []byte(legacy.Value)}
++	return nil
++}

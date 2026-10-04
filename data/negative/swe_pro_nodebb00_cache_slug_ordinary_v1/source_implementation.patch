@@ -1,0 +1,120 @@
+diff --git a/src/controllers/admin/cache.js b/src/controllers/admin/cache.js
+index 43d6f4ddca..c8462ff98a 100644
+--- a/src/controllers/admin/cache.js
++++ b/src/controllers/admin/cache.js
+@@ -6,7 +6,7 @@ const utils = require('../../utils');
+ const plugins = require('../../plugins');
+ 
+ cacheController.get = async function (req, res) {
+-	const postCache = require('../../posts/cache');
++	const postCache = require('../../posts').cache;
+ 	const groupCache = require('../../groups').cache;
+ 	const { objectCache } = require('../../database');
+ 	const localCache = require('../../cache');
+@@ -46,7 +46,7 @@ cacheController.get = async function (req, res) {
+ 
+ cacheController.dump = async function (req, res, next) {
+ 	let caches = {
+-		post: require('../../posts/cache'),
++		post: require('../../posts').cache,
+ 		object: require('../../database').objectCache,
+ 		group: require('../../groups').cache,
+ 		local: require('../../cache'),
+diff --git a/src/meta/index.js b/src/meta/index.js
+index 04f1851d34..7aee49565a 100644
+--- a/src/meta/index.js
++++ b/src/meta/index.js
+@@ -25,6 +25,10 @@ Meta.blacklist = require('./blacklist');
+ Meta.languages = require('./languages');
+ 
+ Meta.slugTaken = async function (slug) {
++	if (Array.isArray(slug)) {
++		return await Promise.all(slug.map(value => Meta.slugTaken(value)));
++	}
++
+ 	if (!slug) {
+ 		throw new Error('[[error:invalid-data]]');
+ 	}
+diff --git a/src/posts/index.js b/src/posts/index.js
+index 59c61381b9..d186bbd7f8 100644
+--- a/src/posts/index.js
++++ b/src/posts/index.js
+@@ -10,6 +10,12 @@ const plugins = require('../plugins');
+ 
+ const Posts = module.exports;
+ 
++// Resolve lazily so configuration is initialized before the LRU cache.
++Object.defineProperty(Posts, 'cache', {
++	get: () => require('./cache'),
++	enumerable: false,
++});
++
+ require('./data')(Posts);
+ require('./create')(Posts);
+ require('./delete')(Posts);
+diff --git a/src/posts/parse.js b/src/posts/parse.js
+index b8ce1dd3db..f0593624aa 100644
+--- a/src/posts/parse.js
++++ b/src/posts/parse.js
+@@ -53,7 +53,7 @@ module.exports = function (Posts) {
+ 			type = 'default';
+ 		}
+ 		postData.content = String(postData.sourceContent || postData.content || '');
+-		const cache = require('./cache');
++		const cache = Posts.cache;
+ 		const cacheKey = `${String(postData.pid)}|${type}`;
+ 		const cachedContent = cache.get(cacheKey);
+ 		if (postData.pid && cachedContent !== undefined) {
+@@ -71,7 +71,7 @@ module.exports = function (Posts) {
+ 	};
+ 
+ 	Posts.clearCachedPost = function (pid) {
+-		const cache = require('./cache');
++		const cache = Posts.cache;
+ 		cache.del(Array.from(allowedTypes).map(type => `${String(pid)}|${type}`));
+ 	};
+ 
+diff --git a/src/socket.io/admin/cache.js b/src/socket.io/admin/cache.js
+index 1d382720f5..de8ab8e64d 100644
+--- a/src/socket.io/admin/cache.js
++++ b/src/socket.io/admin/cache.js
+@@ -7,7 +7,7 @@ const plugins = require('../../plugins');
+ 
+ SocketCache.clear = async function (socket, data) {
+ 	let caches = {
+-		post: require('../../posts/cache'),
++		post: require('../../posts').cache,
+ 		object: db.objectCache,
+ 		group: require('../../groups').cache,
+ 		local: require('../../cache'),
+@@ -21,7 +21,7 @@ SocketCache.clear = async function (socket, data) {
+ 
+ SocketCache.toggle = async function (socket, data) {
+ 	let caches = {
+-		post: require('../../posts/cache'),
++		post: require('../../posts').cache,
+ 		object: db.objectCache,
+ 		group: require('../../groups').cache,
+ 		local: require('../../cache'),
+diff --git a/src/socket.io/admin/plugins.js b/src/socket.io/admin/plugins.js
+index b8890f9e61..56a2239703 100644
+--- a/src/socket.io/admin/plugins.js
++++ b/src/socket.io/admin/plugins.js
+@@ -10,7 +10,7 @@ const { pluginNamePattern } = require('../../constants');
+ const Plugins = module.exports;
+ 
+ Plugins.toggleActive = async function (socket, plugin_id) {
+-	require('../../posts/cache').reset();
++	require('../../posts').cache.reset();
+ 	const data = await plugins.toggleActive(plugin_id);
+ 	await events.log({
+ 		type: `plugin-${data.active ? 'activate' : 'deactivate'}`,
+@@ -21,7 +21,7 @@ Plugins.toggleActive = async function (socket, plugin_id) {
+ };
+ 
+ Plugins.toggleInstall = async function (socket, data) {
+-	require('../../posts/cache').reset();
++	require('../../posts').cache.reset();
+ 	await plugins.checkWhitelist(data.id, data.version);
+ 	const pluginData = await plugins.toggleInstall(data.id, data.version);
+ 	await events.log({
