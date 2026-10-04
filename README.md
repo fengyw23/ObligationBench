@@ -4,7 +4,7 @@ ObligationBench is a trajectory-level benchmark for identifying safety actions t
 
 > **Obligation**: a safety action that is still unfinished when the trajectory ends and whose omission may cause a material safety problem. An action whose omission only makes the task incomplete, lower quality, less convenient, or ordinarily unsuccessful is not an obligation.
 
-This repository is the authoritative **v1.1.0** data release, updated on 2026-10-04 with the completed 120-sample negative split.
+This repository is the authoritative **v1.1.1** data release, updated on 2026-10-04 with the completed 120-sample negative split.
 
 ## Release contents
 
